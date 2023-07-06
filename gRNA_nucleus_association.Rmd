@@ -1,0 +1,180 @@
+---
+title: "gRNA data processing"
+output: html_document
+---
+
+**Libraries**
+```{r message=FALSE, warning=FALSE}
+library(ggplot2)
+library(dplyr)
+library(Seurat)
+library(DoubletFinder)
+library(metap)
+library(DropSeq.util)
+library(dplyr)
+library(tibble)
+library(edgeR)
+library(stringi)
+library(ComplexHeatmap)
+library(SingleCellExperiment)
+library(destiny)
+library(tidyr)
+library(tidymv)
+```
+
+
+**Load functions**
+```{r}
+source("plot_functions.R")
+source("dif.exp_functions.R")
+```
+
+
+**Load data**
+```{r}
+# Single cell object
+seuset <- readRDS(file = "data/pooled_screen_CBh.rds")
+
+# gRNA counts
+guides <- read.csv("data/guide_counts_not_filtered_guide_info.csv", header = T)
+```
+
+
+**Initial QC of guides table**
+```{r}
+# Keep only barcode of detected cells
+guides_filter <- guides[guides$cell %in% seuset$Barcode,]
+
+
+# Calculate coverage (the number of reads divided by the number of UMIs)
+guides_filter$coverage <- guides_filter$read_count / guides_filter$umi_count
+
+# Create column with TRUE or FALSE passing threshold
+guides_filter$coverage_threshold <- log2(guides_filter$coverage) > 4.5
+
+# Plot coverage
+ggplot(guides_filter, aes(y = log10(umi_count+1), x = log10(read_count+1), color = coverage_threshold)) +
+  geom_point(size = 0.4) +
+  plot_def_dotted()
+
+
+ggplot(guides_filter, aes(x = log2(coverage))) +
+  geom_histogram(aes(y=..density..), binwidth = 0.3, alpha = 1) +
+    plot_def_dotted()
+
+```
+
+
+**Counts distribution for each gRNA**
+```{r}
+# Keep only gRNA above coverage
+guides_final <- guides_filter[guides_filter$coverage_threshold == TRUE,]
+
+
+ggplot(guides_final, aes(x = log10(umi_count))) +
+  geom_density(adjust = 2) +
+  #geom_histogram(aes(y=..density..), binwidth = 0.1, alpha = 1) +
+  plot_def_dotted() + geom_vline(xintercept = log10(1.5), colour = "red") +
+  facet_wrap(~ gRNAs, ncol = 8)
+```
+
+**Proportion filter**
+```{r}
+# Calculate proportion
+guides_final <- guides_final %>%
+  group_by(cell) %>%
+  dplyr::mutate(proportion = umi_count / sum(umi_count)) %>%
+  dplyr::ungroup()
+
+
+# Single cell object metadata
+meta <- data.frame(cell = seuset$Barcode,
+                   cell_type = seuset$cell_types_broad)
+
+
+# Filter Count > 1 and proportion > 0.2
+tmp <- guides_final[guides_final$umi_count > 1,]
+tmp <- tmp[tmp$proportion > 0.2,]
+
+# Counts MOI
+tmp <- tmp %>% group_by(cell) %>%
+  mutate(moi = length(umi_count))
+
+
+tmp <- tmp %>%
+  group_by(cell) %>%
+  filter(umi_count == max(umi_count)) %>%
+  dplyr::slice(1)
+
+
+# Join to metadata
+tmp <- merge(tmp, meta, by = "cell", all.y = T)
+tmp <- tmp %>% replace_na(list(moi = 0))
+tmp$per_gene[tmp$moi >1] <- "multiple"
+
+
+# Plot MOI all together
+ggplot(tmp[tmp$cell_type %in% c("Supp_layer_neurons", "Deep_layer_neurons", "Interneurons", "Astrocytes", "Microglia", "Oligodendrocytes") & tmp$moi %in% seq(0, 10),], aes(x = moi, y = after_stat(count)/sum(after_stat(count)))) +
+  geom_bar() +
+  plot_def_dotted()
+
+
+# Plot MOI per cell type
+tmp <- data.frame(table(tmp[,c("cell_type", "moi")]))
+tmp <- tmp %>% group_by(cell_type) %>% mutate(percentage = Freq / sum(Freq))
+
+ggplot(tmp[tmp$cell_type %in% c("Supp_layer_neurons", "Deep_layer_neurons", "Interneurons", "Astrocytes", "Microglia", "Oligodendrocytes") & tmp$moi %in% seq(0, 10),], aes(x = as.numeric(moi), y = percentage)) +
+  geom_bar(stat = "identity") +
+  plot_def_dotted() +
+  facet_wrap(~cell_type)
+
+```
+
+
+**Bubble plot with number of cells per perturbation**
+```{r}
+# Get counts per cell type
+per_dis <- data.frame(table(seuset$cell_types_broad, seuset$per_gene))
+
+# Remove cell types and conditions not in use
+per_dis <- per_dis[per_dis$Var1 %in% c("Supp_layer_neurons", "Deep_layer_neurons", "Interneurons", "Astrocytes", "Microglia", "Oligodendrocytes"), ]
+
+per_dis$cell_types <- factor(per_dis$Var1, levels = rev(c(c("Supp_layer_neurons", "Deep_layer_neurons", "Interneurons", "Astrocytes", "Oligodendrocytes", "Microglia"))))
+
+ggplot(per_dis, aes(x = Var2, y = cell_types, size = Freq, color = cell_types)) +
+  geom_point(alpha=1) +
+  scale_size(name="Absolute frequency") +
+  plot_def_angle_no_axis_dotted() +
+    theme(legend.position="bottom",
+        legend.title = element_blank()) +
+  scale_color_manual(values=c("Supp_layer_neurons" = "#E2485F", "Deep_layer_neurons" = "#F8B650", "Interneurons" = "#437DB8", "Astrocytes" = "#AECC39", "Oligodendrocytes" = "#882E76", "Polidendrocytes" = "#B687BB", "Microglia" = "#444197"))
+
+
+# Average perturbation per cell type
+ggplot(per_dis, aes(x = reorder(cell_types, Freq), y = Freq, fill = cell_types)) + geom_violin() + coord_flip() +
+  scale_y_continuous(trans='log10') + plot_def_dotted() +
+  scale_fill_manual(values=c("Supp_layer_neurons" = "#E2485F", "Deep_layer_neurons" = "#F8B650", "Interneurons" = "#437DB8", "Astrocytes" = "#AECC39", "Oligodendrocytes" = "#882E76", "Polidendrocytes" = "#B687BB", "Microglia" = "#444197")) + NoLegend() + theme(aspect.ratio=1/1.3)
+
+
+
+# Number of cells in CT vs average cells per perturbation
+per_dis <- per_dis %>% group_by(Var1) %>% mutate(n_cells = sum(Freq), average_cell_perturbation = mean(Freq))
+
+meta_per_dis <- per_dis[!duplicated(per_dis$cell_types),]
+
+ggplot(meta_per_dis, aes(x = average_cell_perturbation, y = n_cells, label = Var1, color = Var1)) +
+  geom_point(size = 3) +
+  scale_y_continuous(trans='log10') + scale_x_continuous(trans='log10') +
+  plot_def_dotted() +
+  theme(aspect.ratio=1/1) +
+  geom_text(hjust=0, vjust=0) + scale_color_manual(values=c("Supp_layer_neurons" = "#E2485F", "Deep_layer_neurons" = "#F8B650", "Interneurons" = "#437DB8", "Astrocytes" = "#AECC39", "Oligodendrocytes" = "#882E76", "Polidendrocytes" = "#B687BB", "Microglia" = "#444197")) + NoLegend()
+
+```
+
+
+```{r}
+sessionInfo()
+```
+
+
+
