@@ -1,0 +1,342 @@
+---
+title: "lgdel data analysis"
+output: html_document
+---
+
+**Libraries**
+```{r message=FALSE, warning=FALSE}
+library(ggplot2)
+library(dplyr)
+library(Seurat)
+library(DoubletFinder)
+library(metap)
+library(DropSeq.util)
+library(dplyr)
+library(tibble)
+library(edgeR)
+library(stringi)
+library(ComplexHeatmap)
+library(SingleCellExperiment)
+library(destiny)
+library(tidyr)
+library(tidymv)
+library(ggrepel)
+library(MASS)
+```
+
+
+**Load functions**
+```{r}
+source("plot_functions.R")
+source("dif.exp_functions.R")
+```
+
+
+**Load data**
+```{r}
+seuset <- readRDS("data/lgdel_model.rds")
+
+perturbation_locus_order <- c("Hira", "Mrpl40", "Ufd1", "Septin5", "Gnb1l", "Txnrd2", "Comt", "Arvcf", "Tango2", "Dgcr8", "Trmt2a", "Ranbp1", "Zdhhc8", "Rtn4r", "Dgcr6", "Slc25a1", "Ess2", "Dgcr2", "Scarf2", "Med15", "Ccdc74a", "Slc7a4", "Lztr1", "Aifm3", "Crkl", "Snap29", "Pi4ka", "Tmem191c", "Hic2", "Rimbp3")
+
+```
+
+
+**Plot UMAP per sample**
+```{r}
+DimPlot(seuset, reduction = "umap", group.by = "condition", split.by = "condition")
+DimPlot(seuset, reduction = "umap", group.by = "condition", split.by = "per_gene")
+```
+
+
+**Plot normalized number of cells per cell type**
+```{r}
+ct_count <- data.frame(table(seuset@meta.data[,c("condition", "cell_types_broad", "per_gene")]))
+
+ct_count <- ct_count[ct_count$Freq != 0,]
+
+# Use a scaling factor to account for the total number of cells per conditions
+ct_count <- ct_count %>% group_by(per_gene) %>%
+  mutate(scale_factor = 10000/sum(Freq))
+
+ct_count$freq_scaled <- ct_count$Freq * ct_count$scale_factor
+
+# Percentage
+ct_count <- ct_count %>%
+  group_by(per_gene) %>%
+  mutate(value = freq_scaled/sum(freq_scaled))
+
+
+ggplot(ct_count, aes(x = reorder(cell_types_broad, value), y = value, fill = condition)) +
+  scale_fill_manual(values=c("#882E76", "#D1D2D2")) +
+  geom_dotplot(binaxis='y', stackdir='center', position = "dodge", dotsize=1) +
+  plot_def_dotted() +
+  coord_flip()
+```
+
+
+**Calculate differential expression**
+```{r}
+Idents(seuset) <- seuset$per_gene
+
+# Pseudobulk
+lgdel_bulk_all_genes <- list()
+for (i in c("Supp_layer_neurons", "Deep_layer_neurons", "Interneurons", "Astrocytes", "Oligodendrocytes")){
+  bulk <- pseudoBulk_screen(object = seuset,
+                            assay = "counts",
+                            ct_col_meta = "cell_types_broad",
+                            cell_type = i,
+                            perturb_info = c("wt", "lgdel"),
+                            perturbation_col_meta = "condition",
+                            sample_meta = "per_gene",
+                            min_features = 0)
+  
+  
+  lgdel_bulk_all_genes[[i]] <- bulk
+}
+
+
+# DE
+deg_all_genes <- list()
+deg_all_genes_long <- data.frame()
+for (i in c("Supp_layer_neurons", "Deep_layer_neurons", "Interneurons", "Astrocytes", "Oligodendrocytes")){
+  # Prepare metadata
+  meta <- data.frame(pseudobulk = colnames(lgdel_bulk_all_genes[[i]]),
+                     umi_count = colSums(lgdel_bulk_all_genes[[i]]))
+  meta$per_gene <- gsub("\\:.*", "", meta$pseudobulk)
+  meta <- within(meta, per_gene <- relevel(as.factor(per_gene), ref = "wt"))
+  
+  # edgeR
+  deg <- pseudoDE_lgdel(counts = lgdel_bulk_all_genes[[i]],
+                metadata = meta,
+                groups = "lgdel",
+                de_test = "edgeR",
+                de_subtest = "LRT")
+  
+  deg$cell_type <- i
+    
+  deg_all_genes[[i]] <- deg
+    
+  deg_all_genes_long <- rbind(deg_all_genes_long, deg)
+}
+```
+
+
+**Plot LFC for genes inside the 22q11.2 locus**
+```{r}
+locus_genes_deg <- deg_all_genes_long[deg_all_genes_long$gene %in% perturbation_locus_order, ]
+
+locus_genes_deg$gene <- factor(locus_genes_deg$gene, levels = perturbation_locus_order)
+
+ggplot(locus_genes_deg, aes(x = gene, y = logFC, color = cell_type)) +
+  geom_hline(yintercept = 0, linetype = "dashed") + geom_point() +
+  plot_def_dotted_angle() +
+  scale_color_manual(values = c("Supp_layer_neurons" = "#E2485F", "Deep_layer_neurons" = "#F8B650", "Interneurons" = "#437DB8", "Astrocytes" = "#AECC39", "Oligodendrocytes" = "#882E76"))
+
+ggplot(locus_genes_deg, aes(x = gene, y = logFC, color = FDR)) +
+  geom_hline(yintercept = 0, linetype = "dashed") + geom_point() +
+  plot_def_dotted_angle()
+```
+
+
+**Get DE genes with filter avg expression > 0.25 log1p(UMI)**
+```{r}
+deg_lgdel <- list()
+deg_long <- data.frame()
+lgdel_bulk <- list()
+for (i in c("Supp_layer_neurons", "Deep_layer_neurons", "Interneurons", "Astrocytes", "Oligodendrocytes")){
+  avg_exp <- rowMeans(seuset@assays$RNA@data[,colnames(seuset@assays$RNA@data) %in% rownames(seuset@meta.data[seuset$cell_types_broad == i & seuset$condition == "wt",])])
+  avg_exp <- avg_exp[avg_exp > 0.25]
+  avg_exp <- data.frame(avg_exp)
+  avg_exp$gene <- rownames(avg_exp)
+  
+  deg_lgdel[[i]] <- deg_all_genes[[i]][deg_all_genes[[i]]$gene %in% avg_exp$gene,]
+  lgdel_bulk[[i]] <- lgdel_bulk_all_genes[[i]][avg_exp$gene, ]
+  
+  
+  # Create new long format
+  deg_long <- rbind(deg_long, deg_lgdel[[i]])
+}
+```
+
+
+**PCA and correlation plots**
+```{r}
+de_genes <- c()
+# Get DE genes from all cell types
+for (i in c("Supp_layer_neurons", "Deep_layer_neurons", "Interneurons", "Astrocytes", "Oligodendrocytes")){
+  ge <- deg_lgdel[[i]] %>% top_n(500, abs(logFC))
+  
+  de_genes <- c(de_genes, ge$gene)
+}
+
+de_genes <- unique(de_genes)
+
+
+pca_data <- deg_long[,c("gene", "logFC", "cell_type")] %>% pivot_wider(names_from = cell_type, values_from = logFC)
+
+pca_data <- pca_data %>% column_to_rownames("gene")
+
+#pca_data[is.na(pca_data)] <- 0
+pca_data <- pca_data[de_genes,]
+pca_data <- pca_data[complete.cases(pca_data),]
+
+res.pca <- prcomp(t(pca_data))
+
+# Take pca coordinates
+pca_coords <- data.frame(res.pca$x)
+pca_coords$cell_type <- rownames(pca_coords)
+
+
+ggplot(pca_coords, aes(x = PC1, y = PC2, label = cell_type)) +
+  geom_point(size = 2) +
+  geom_text_repel(size = 3, direction = "both") +
+  plot_def_dotted()
+
+
+summary(res.pca)
+
+
+pheatmap::pheatmap(cor(pca_data), 
+                   color = c(colorRampPalette(c("#437DB8", "floralwhite"))(1000),
+                                   colorRampPalette(c("floralwhite", "#E2485F"))(1000)), 
+                         breaks = c(seq(0, 0.5, length.out = 1000),
+                                    seq(0.51, 1, length.out = 1000)))
+
+```
+
+
+**Heatmap with cell types and conditions**
+```{r}
+bulk_total <- data.frame(gene = rownames(lgdel_bulk_all_genes$Supp_layer_neurons))
+for (i in c("Supp_layer_neurons", "Deep_layer_neurons", "Interneurons", "Astrocytes", "Oligodendrocytes")){
+  a <- lgdel_bulk[[i]]
+  colnames(a) <- paste(i, colnames(a), sep = ".")
+  a$gene <- rownames(a)
+  
+  bulk_total <- merge(bulk_total, a, by = "gene", all.x = T, all.y = T)
+}
+
+
+# Select genes to plot
+de_genes <- c()
+for (i in c("Supp_layer_neurons", "Deep_layer_neurons", "Interneurons", "Astrocytes", "Oligodendrocytes")){
+  de_genes <- c(de_genes, deg_lgdel[[i]]$gene)
+}
+
+de_genes <- unique(de_genes)
+
+
+# Normalize pseudobulk counts
+bulk_total <- bulk_total[bulk_total$gene %in% de_genes,]
+rownames(bulk_total) <- NULL
+bulk_total <- bulk_total %>% column_to_rownames("gene")
+
+bulk_total[is.na(bulk_total)] <- 0
+
+fact <- as.vector(1000000 / colSums(bulk_total))
+cpm <- data.frame(t(t(bulk_total) * fact))
+
+
+cpm <- log1p(cpm)
+
+cpm <- data.frame(t(scale(t(cpm))))
+
+pheatmap::pheatmap(cpm,
+                   color = c(colorRampPalette(c("#437DB8", "floralwhite"))(1000),
+                                   colorRampPalette(c("floralwhite", "#E2485F"))(1000)), 
+                         breaks = c(seq(-3, -0.01, length.out = 1000),
+                                    seq(0.01, 3, length.out = 1000)),)
+
+
+
+
+```
+
+
+**Predict LgDel with individual perturbations**
+```{r}
+# Load DEG screen
+load(file = "data/deg_tables_screen_bulk_analysis.rds")
+deg_screen <- deg_bulk
+rm(deg_bulk)
+
+names(deg_screen) <- c("Supp_layer_neurons", "Deep_layer_neurons", "Interneurons")
+
+for (i in c("Supp_layer_neurons", "Deep_layer_neurons", "Interneurons")){
+  names(deg_screen[[i]])[names(deg_screen[[i]]) == "Dgcr8_KO"] <- "Dgcr8"
+  names(deg_screen[[i]])[names(deg_screen[[i]]) == "Dgcr14_KO"] <- "Dgcr14"
+  names(deg_screen[[i]])[names(deg_screen[[i]]) == "Gnb1l_KO"] <- "Gnb1l"
+  names(deg_screen[[i]])[names(deg_screen[[i]]) == "Ufd1l_KO"] <- "Ufd1l"
+}
+
+
+model_pred <- list()
+dcor_del_pred <- list()
+group_dist <- data.frame(group = c("Dgcr8", "Dgcr14", "Gnb1l", "lgdel"))
+for (ct in c("Interneurons")){ # c("Supp_layer_neurons", "Deep_layer_neurons", "Interneurons")
+
+  lfc <- data.frame(gene = deg_screen[[ct]]$Dgcr8$gene)
+  
+  # Data from screen
+  for (i in c("Dgcr8", "Dgcr14", "Gnb1l")){
+    a <- deg_screen[[ct]][[i]][,c("gene", "logFC")]
+    colnames(a) <- c("gene", i)
+    
+    lfc <- merge(lfc, a, by = "gene")
+  }
+  
+  # Data from deletion
+  a <- deg_lgdel[[ct]][,c("gene", "logFC")]
+  colnames(a) <- c("gene", "lgdel")
+  
+  lfc <- merge(lfc, a, by = "gene")
+  
+  lfc <- lfc %>% column_to_rownames("gene")
+  
+  
+  keep_genes <- deg_lgdel[[ct]] %>% top_n(-1000, FDR) %>% dplyr::select(gene) %>% deframe()
+  keep_genes <- keep_genes[!keep_genes %in% perturbation_locus_order]
+  
+  lfc_de <- lfc[rownames(lfc) %in% keep_genes,]
+
+  
+  m <- rlm(lgdel ~ Dgcr14 + Gnb1l + Dgcr8, data = data.frame(scale(lfc_de)))
+  model_pred[[ct]] <- m
+
+  lfc_de$prediction <- lfc_de$Dgcr8 * m$coefficients["Dgcr8"] + lfc_de$Dgcr14 * m$coefficients["Dgcr14"] + lfc_de$Gnb1l * m$coefficients["Gnb1l"]
+
+  
+  # Take only top 100 genes in prediction to plot
+  dis_genes <- lfc_de %>% top_n(100, abs(prediction))
+  
+  print(paste(ct, " dcor = ", energy::dcor(dis_genes$lgdel, dis_genes$prediction), sep = ""))
+  
+  pheatmap::pheatmap(t(dis_genes),
+                   scale = "none", cluster_rows = F,
+                   show_colnames = T,
+                   color = c(colorRampPalette(c("#437DB8", "floralwhite"))(1000),
+                                   colorRampPalette(c("floralwhite", "#E2485F"))(1000)), 
+                         breaks = c(seq(-1, -0.01, length.out = 1000),
+                                    seq(0.01, 1, length.out = 1000)))
+
+  
+  pheatmap::pheatmap(t(dis_genes[,c("lgdel", "prediction")]),
+                   scale = "none", cluster_rows = F,
+                   show_colnames = T,
+                   color = c(colorRampPalette(c("#437DB8", "floralwhite"))(1000),
+                                   colorRampPalette(c("floralwhite", "#E2485F"))(1000)), 
+                         breaks = c(seq(-1, -0.01, length.out = 1000),
+                                    seq(0.01, 1, length.out = 1000)))
+
+
+}
+
+
+
+```
+
+
+```{r}
+sessionInfo()
+```
+
