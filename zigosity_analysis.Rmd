@@ -1,0 +1,206 @@
+---
+title: "zigosity analysis"
+output: html_document
+---
+
+**Libraries**
+```{r message=FALSE, warning=FALSE}
+library(ggplot2)
+library(dplyr)
+library(Seurat)
+library(DoubletFinder)
+library(metap)
+library(DropSeq.util)
+library(dplyr)
+library(tibble)
+library(edgeR)
+library(stringi)
+library(ComplexHeatmap)
+library(SingleCellExperiment)
+library(destiny)
+library(tidyr)
+library(tidymv)
+```
+
+
+**Load functions**
+```{r}
+source("plot_functions.R")
+source("dif.exp_functions.R")
+```
+
+
+**Load data**
+```{r}
+perturbation_locus_order <- c("Hira", "Mrpl40", "Ufd1", "Septin5", "Gnb1l", "Txnrd2", "Comt", "Arvcf", "Tango2", "Dgcr8", "Trmt2a", "Ranbp1", "Zdhhc8", "Rtn4r", "Dgcr6", "Slc25a1", "Ess2", "Dgcr2", "Scarf2", "Med15", "Ccdc74a", "Slc7a4", "Lztr1", "Aifm3", "Crkl", "Snap29", "Pi4ka", "Tmem191c", "Hic2", "Rimbp3")
+
+# Single cell object
+seuset <- readRDS(file = "data/arrayed_screen_hSyn.rds")
+
+load(file = "data/deg_tables_screen_bulk_analysis.rds")
+deg_screen <- deg_bulk
+rm(deg_bulk)
+
+load(file = "data/deg_dataset_array.rds")
+
+# Keep only genes that are present in deg_screen
+for (i in c("Supp_layer_neurons", "Deep_layer_neurons", "Interneurons")){
+  for (y in c("Dgcr8", "Dgcr14", "Gnb1l")){
+    deg_array[[i]][[y]] <- deg_array[[i]][[y]][deg_array[[i]][[y]]$gene %in% deg_screen[[i]][[paste(y, "_KO", sep = "")]]$gene, ]
+  }
+}
+
+
+# Move cell names to column
+seuset$cell_name <- rownames(seuset@meta.data)
+```
+
+
+**Diffusion map**
+```{r}
+i <- "Interneurons"
+y <- "Dgcr14"
+
+
+# Create Seurat object with cells of interest
+pair <- subset(seuset, subset = per_gene == c("Safe_H", y) & cell_types_broad == "Interneurons")
+
+# Change cell name to avoid . and -
+pair$cell_name <- gsub("-.*", "", pair$cell_name)
+pair$cell_name <- paste(pair$cell_name, pair$per_gene, sep = "")
+
+pair <- RenameCells(pair,
+                    new.names =  pair$cell_name,
+                    old.names = rownames(pair@meta.data))
+
+#Idents(pair) <- pair$orig.ident
+
+# Genes to use as features for diffusion map
+ge <- deg_array[[i]][[y]]$gene[abs(deg_array[[i]][[y]]$logFC) > 0.5 & deg_array[[i]][[y]]$FDR < 0.01]
+
+# Take data table, select genes of interest
+deng <- data.frame(pair@assays$RNA@data)
+deng <- deng[ge, ]
+
+dm <- DiffusionMap(t(deng))
+
+
+tmp <- data.frame(DC1 = eigenvectors(dm)[, 2],
+                  DC2 = eigenvectors(dm)[, 18],
+                  orig.ident = pair$per_gene,
+                  cell.type = pair$cell_types_broad)
+
+
+# Merge PCs with gene expression and metadata
+tmp$cell_name <- rownames(tmp)
+tmp$rank_DC1 <- rank(tmp$DC1)
+
+deng <- data.frame(t(deng))
+deng$cell_name <- rownames(deng)
+
+rd1 <- merge(tmp, deng, by = "cell_name")
+
+
+# Plot diffusion Map
+ggplot(rd1, aes(x = DC1, y = DC2, color = orig.ident)) +
+    geom_point() + #scale_color_tableau() + 
+    plot_def() +
+    xlab("Diffusion component 1") + 
+    ylab("Diffusion component 2") +
+  scale_color_manual(values = c("Safe_H" = "#D1D2D2", "Dgcr8" = "#E2485F", "Dgcr14" = "#437DB8", "Gnb1l" = "#F8B650"))
+
+```
+
+
+
+**Histogram and density plot**
+```{r}
+hist_data <- rd1[,c("orig.ident", "DC1")]
+
+# Organize samples to plot in the correct order
+hist_data$orig.ident <- factor(hist_data$orig.ident, levels = c("Safe_H", y))
+rd1$orig.ident <- factor(rd1$orig.ident, levels = c("Safe_H", y))
+
+
+ggplot(rd1, aes(x = DC1, fill=orig.ident)) +
+  geom_histogram(aes(y=..density..), binwidth=0.0005, alpha = 1) +
+  plot_def_dotted() + 
+  scale_fill_manual(values = c("Safe_H" = "#D1D2D2", "Dgcr8" = "#E2485F", "Dgcr14" = "#437DB8", "Gnb1l" = "#F8B650")) +
+  facet_wrap(~ orig.ident, nrow = 2)
+
+ggplot(rd1, aes(x = DC1, fill=orig.ident)) +
+  geom_density(alpha =1, adjust = 1/2) +
+  plot_def_dotted() + 
+  scale_fill_manual(values = c("Safe_H" = "#D1D2D2", "Dgcr8" = "#E2485F", "Dgcr14" = "#437DB8", "Gnb1l" = "#F8B650")) +
+  facet_wrap(~ orig.ident, nrow = 2)
+```
+
+
+**Calculate k means of perturbations nuclei**
+```{r}
+rd1_pert <- rd1[rd1$orig.ident == y,]
+fit <- kmeans(rd1_pert$DC1, 3)
+
+rd1_pert$kmeans <- fit$cluster
+
+ggplot(rd1_pert, aes(x = DC1, fill=as.character(kmeans))) +
+  geom_histogram(binwidth=0.0005, alpha = 0.8) +
+  plot_def_dotted() +
+  scale_y_continuous(limits = c(0, 9)) +
+  scale_x_continuous(limits = c(min(rd1$DC1), max(rd1$DC1))) +
+  facet_grid(kmeans ~ ., scales = "free_y")
+
+```
+
+
+**Add kmeans metadata to seurat object metadata**
+```{r}
+rd1_pert$kmeans <- as.character(rd1_pert$kmeans)
+
+# Change kmeans to names
+rd1_pert <- rd1_pert %>%
+  mutate(kmeans = case_when(
+    kmeans == "2" ~ "wt",
+    kmeans == "3" ~ "hetero",
+    kmeans == "1" ~ "homo",
+    TRUE ~ kmeans
+  ))
+
+# Merge to rd1 data
+rd1 <- merge(rd1_pert[,c("cell_name", "kmeans")], rd1, by = "cell_name", all.x = T, all.y = T)
+
+rd1 <- rd1 %>%
+  mutate(kmeans = coalesce(kmeans, orig.ident))
+
+# Add to metadata
+tmp <- rd1[,c("rank_DC1", "DC1", "kmeans", "cell_name")]
+
+tmp <- tmp %>% column_to_rownames("cell_name")
+
+pair <- AddMetaData(pair, metadata = tmp)
+```
+
+
+**Plot the clusters**
+```{r}
+rd1_pert$kmeans <- factor(rd1_pert$kmeans, levels = c("wt", "hetero", "homo"))
+
+
+# Plot the 3 clusters
+ggplot(rd1_pert, aes(x = DC1, fill=kmeans)) +
+  geom_histogram(binwidth=0.0005, alpha = 1) +
+  plot_def_dotted() +
+  scale_y_continuous(limits = c(0, 10)) +
+  scale_x_continuous(limits = c(min(rd1$DC1), max(rd1$DC1))) +
+  scale_fill_manual(values = c("wt" = "#d95f02", "hetero" = "#7570b3", "homo" = "#1b9e77")) +
+  facet_grid(kmeans ~ ., scales = "free_y")
+
+```
+
+
+```{r}
+sessionInfo()
+```
+
+
+
