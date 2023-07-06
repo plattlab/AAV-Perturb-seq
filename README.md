@@ -6,11 +6,13 @@ Santinha, A.J., Klingler, E., Kuhn, M., Farouni, R., Lagler, S., Kalamakis, G., 
 
 Download the R objects from GEO to use the notebooks: GSE236519.
 
-* `gRNA_nucleus_association.Rmd` constain code for gRNA QC, filtering, and integration with gene expression data
+* `gRNA_nucleus_association.Rmd` contains code for gRNA QC, filtering, and integration with gene expression data
 
 * `pooled_screen_analysis.Rmd` accepts scRNA-seq screen data containing multiple cell types and perturbations
   - Filter non-perturbed cells with LDA
   - Create pseudobulks of perturbed cells
   - Calculate differential expression with edgeR using pseudobulks as input
   - Plot cell type-specific UMAPs with perturbed cells
+ 
+* `zigosity_analysis.Rmd` contains code to separate perturbed cells by zygosity states.
 
