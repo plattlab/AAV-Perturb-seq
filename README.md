@@ -6,6 +6,10 @@ Santinha, A.J., Klingler, E., Kuhn, M., Farouni, R., Lagler, S., Kalamakis, G., 
 
 Download the R objects from GEO to use the notebooks: GSE236519.
 
+Count tables for gRNA expression libraries are generated as shown in Hill et al 2018 (https://github.com/shendurelab/single-cell-ko-screens.git)
+
+Scripts in this repo:
+
 * `gRNA_nucleus_association.Rmd` contains code for gRNA QC, filtering, and integration with gene expression data
 
 * `pooled_screen_analysis.Rmd` accepts scRNA-seq screen data containing multiple cell types and perturbations
