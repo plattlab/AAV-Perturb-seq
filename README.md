@@ -14,5 +14,11 @@ Download the R objects from GEO to use the notebooks: GSE236519.
   - Calculate differential expression with edgeR using pseudobulks as input
   - Plot cell type-specific UMAPs with perturbed cells
  
-* `zigosity_analysis.Rmd` contains code to separate perturbed cells by zygosity states.
+* `zigosity_analysis.Rmd` contains code to separate perturbed cells by zygosity states
+
+* `lgdel_data_analysis.Rmd` contains code to analyze the LgDel dataset and compare individual perturbations to the full deletion
+
+* `plot_functions.R` contains support functions for plots
+
+* `dif.exp_functions.R` contains support functions for filtering, differential expression, and data visualization
 
